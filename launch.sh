@@ -29,6 +29,8 @@ PATCH_SCRIPT="$SCRIPT_DIR/patch_core.py"
 ENGINE_PORT=8080
 STREAMLIT_PORT=8501
 
+CONTEXT_SIZE=8192 # Default Siaz
+
 mkdir -p "$LOG_DIR" "$SCRIPT_DIR/logs" 2>/dev/null
 
 # ── Colours ────────────────────────────────────────────────────────
@@ -48,7 +50,7 @@ _notify() {
 
 echo ""
 echo -e "${C}${W}  ╔══════════════════════════════════════════════╗"
-echo -e "  ║   🦀  rust-ai-kit  —  Starting up           ║"
+echo -e "  ║   🦀  llm_factory  —  Starting up           ║"
 echo -e "  ╚══════════════════════════════════════════════╝${N}"
 echo ""
 
@@ -252,7 +254,7 @@ _start_engine_once() {
     SYCL_DEVICE_FILTER="level_zero:gpu" \
     nohup setsid "$LLAMACPP_BIN" \
         --model        "$model_path" \
-        --ctx-size     8192 \
+        --ctx-size     "$CONTEXT_SIZE" \    # set a top, deafault 8192
         --n-gpu-layers "$GPU_LAYERS" \
         --port         "$ENGINE_PORT" \
         --host         127.0.0.1 \
