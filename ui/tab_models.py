@@ -326,7 +326,7 @@ def tab_models():
 
                 for m in models:
                     dest = MODEL_DIR / m["file"]
-                    _model_card(m, dest, m["file"][:20].replace(".", "_"))
+                    _model_card(m, dest, m["file"].replace(".", "_"))
 
                 st.divider()
 
