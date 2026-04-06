@@ -43,78 +43,315 @@ SEARXNG_URL = f"http://localhost:{SEARXNG_PORT}"
 LLAMA_SERVER_MODEL = "llama"
 LLAMA_API_KEY      = "local"
 
-# ── Curated model catalogue — exact match with _model_catalogue() in the script ──
-# Fields: name, file, url, vram (str GB), desc
+# ── Curated model catalogue ────────────────────────────────────────────────────
+# Each entry fields:
+#   name        display name
+#   file        local filename (.gguf)
+#   url         direct download URL (HuggingFace resolve/main)
+#   vram        estimated VRAM in GB at Q4_K_M (str)
+#   category    one of the MODEL_CATEGORIES keys below
+#   tags        list of short badge strings shown in the UI
+#   desc        one-sentence plain-English description (shown to novice users)
+#   notes       optional longer note (A770 tips, special flags needed, etc.)
+#   new         bool — True highlights the card with a 🔥 New badge
+#   recommended bool — True adds ⭐ Recommended badge
+#   jinja       bool — requires --jinja flag to work correctly
+#   vision      bool — multimodal model (requires mmproj, extra setup)
+#
+# All models verified to have a GGUF on HuggingFace as of 2025-04.
+# Source: bartowski (main curator), official org repos (Qwen, DeepSeek).
+# ─────────────────────────────────────────────────────────────────────────────
+
+MODEL_CATEGORIES: Dict[str, str] = {
+    "⭐ General / Chat":   "Balanced, all-purpose assistants — good starting point",
+    "🧠 Reasoning":        "Chain-of-thought models that 'think before answering'",
+    "💻 Coding":           "Specialised for code generation, debugging & refactoring",
+    "👁️ Vision / Multimodal": "Can describe or reason about images alongside text",
+    "⚡ Small / Edge":     "Under 3 GB — fast, low-VRAM, great for quick tasks",
+}
+
 MODEL_CATALOGUE: List[Dict] = [
+
+    # ── General / Chat ─────────────────────────────────────────────────────────
     {
         "name": "Llama 3.1 8B Instruct Q4_K_M",
         "file": "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf",
         "url":  ("https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF"
                  "/resolve/main/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf"),
-        "vram": "5.5", "desc": "Best all-rounder. Fast, instruction-tuned, fits with room to spare.",
+        "vram": "5.5", "category": "⭐ General / Chat",
+        "tags": ["Meta", "8B", "Q4_K_M", "128k ctx"],
+        "recommended": True, "new": False, "jinja": False, "vision": False,
+        "desc": "Meta's flagship 8B — the best balanced starting point for most users.",
+        "notes": "Excellent all-rounder with 128k context support. ~30 tok/s on A770.",
     },
     {
         "name": "Llama 3.1 8B Instruct Q8_0",
         "file": "Meta-Llama-3.1-8B-Instruct-Q8_0.gguf",
         "url":  ("https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF"
                  "/resolve/main/Meta-Llama-3.1-8B-Instruct-Q8_0.gguf"),
-        "vram": "9.0", "desc": "Higher quality than Q4, still fits. Slower throughput.",
-    },
-    {
-        "name": "Mistral 7B Instruct v0.3 Q4_K_M",
-        "file": "Mistral-7B-Instruct-v0.3-Q4_K_M.gguf",
-        "url":  ("https://huggingface.co/bartowski/Mistral-7B-Instruct-v0.3-GGUF"
-                 "/resolve/main/Mistral-7B-Instruct-v0.3-Q4_K_M.gguf"),
-        "vram": "5.0", "desc": "Excellent for coding and structured tasks. Very fast.",
-    },
-    {
-        "name": "Mistral 7B Instruct v0.3 Q8_0",
-        "file": "Mistral-7B-Instruct-v0.3-Q8_0.gguf",
-        "url":  ("https://huggingface.co/bartowski/Mistral-7B-Instruct-v0.3-GGUF"
-                 "/resolve/main/Mistral-7B-Instruct-v0.3-Q8_0.gguf"),
-        "vram": "8.5", "desc": "Near-lossless quality Mistral. Great for long-form writing.",
-    },
-    {
-        "name": "Phi-3.5 Mini Instruct Q4_K_M",
-        "file": "Phi-3.5-mini-instruct-Q4_K_M.gguf",
-        "url":  ("https://huggingface.co/bartowski/Phi-3.5-mini-instruct-GGUF"
-                 "/resolve/main/Phi-3.5-mini-instruct-Q4_K_M.gguf"),
-        "vram": "2.8", "desc": "Tiny but surprisingly capable. Fastest option.",
+        "vram": "9.0", "category": "⭐ General / Chat",
+        "tags": ["Meta", "8B", "Q8_0", "high quality"],
+        "recommended": False, "new": False, "jinja": False, "vision": False,
+        "desc": "Near-full-precision Llama 3.1 8B — noticeably sharper than Q4.",
+        "notes": "Best quality for models that fully fit in VRAM. ~22 tok/s on A770.",
     },
     {
         "name": "Qwen2.5 7B Instruct Q4_K_M",
         "file": "Qwen2.5-7B-Instruct-Q4_K_M.gguf",
         "url":  ("https://huggingface.co/bartowski/Qwen2.5-7B-Instruct-GGUF"
                  "/resolve/main/Qwen2.5-7B-Instruct-Q4_K_M.gguf"),
-        "vram": "5.2", "desc": "Excellent at coding, maths, multilingual.",
+        "vram": "5.2", "category": "⭐ General / Chat",
+        "tags": ["Alibaba", "7B", "Q4_K_M", "multilingual"],
+        "recommended": False, "new": False, "jinja": False, "vision": False,
+        "desc": "Alibaba's Qwen2.5 — strong maths, multilingual, 128k context.",
+        "notes": "Outperforms Llama on maths and structured output. Supports 29 languages.",
     },
     {
         "name": "Qwen2.5 14B Instruct Q4_K_M",
         "file": "Qwen2.5-14B-Instruct-Q4_K_M.gguf",
         "url":  ("https://huggingface.co/bartowski/Qwen2.5-14B-Instruct-GGUF"
                  "/resolve/main/Qwen2.5-14B-Instruct-Q4_K_M.gguf"),
-        "vram": "9.5", "desc": "Noticeably smarter than 7B. Fits A770 with ctx 4096.",
+        "vram": "9.5", "category": "⭐ General / Chat",
+        "tags": ["Alibaba", "14B", "Q4_K_M", "multilingual"],
+        "recommended": False, "new": False, "jinja": False, "vision": False,
+        "desc": "Noticeably smarter than Qwen2.5 7B — fits A770 with ctx 4096.",
+        "notes": "Reduce --ctx-size to 4096 on A770 to avoid OOM.",
     },
+    {
+        "name": "Mistral Small 3.2 24B Instruct Q4_K_M",
+        "file": "mistralai_Mistral-Small-3.2-24B-Instruct-2506-Q4_K_M.gguf",
+        "url":  ("https://huggingface.co/bartowski/mistralai_Mistral-Small-3.2-24B-Instruct-2506-GGUF"
+                 "/resolve/main/mistralai_Mistral-Small-3.2-24B-Instruct-2506-Q4_K_M.gguf"),
+        "vram": "14.5", "category": "⭐ General / Chat",
+        "tags": ["Mistral", "24B", "Q4_K_M", "🔥 New"],
+        "recommended": False, "new": True, "jinja": True, "vision": False,
+        "desc": "Mistral's latest 24B — near-frontier quality, just fits A770.",
+        "notes": "Requires --jinja flag. Use ctx 4096 on A770. Released mid-2025.",
+    },
+    {
+        "name": "Gemma 2 9B Instruct Q4_K_M",
+        "file": "gemma-2-9b-it-Q4_K_M.gguf",
+        "url":  ("https://huggingface.co/bartowski/gemma-2-9b-it-GGUF"
+                 "/resolve/main/gemma-2-9b-it-Q4_K_M.gguf"),
+        "vram": "6.0", "category": "⭐ General / Chat",
+        "tags": ["Google", "9B", "Q4_K_M", "efficient"],
+        "recommended": False, "new": False, "jinja": False, "vision": False,
+        "desc": "Google Gemma 2 9B — excellent instruction following, very clean outputs.",
+        "notes": "Google's best small model. Punches above its weight on benchmarks.",
+    },
+    {
+        "name": "Gemma 4 31B Instruct Q4_K_M",
+        "file": "google_gemma-4-31B-it-Q4_K_M.gguf",
+        "url":  ("https://huggingface.co/bartowski/google_gemma-4-31B-it-GGUF"
+                 "/resolve/main/google_gemma-4-31B-it-Q4_K_M.gguf"),
+        "vram": "19.6", "category": "⭐ General / Chat",
+        "tags": ["Google", "31B", "Q4_K_M", "🔥 New", "Jinja"],
+        "recommended": False, "new": True, "jinja": True, "vision": True,
+        "desc": "Google's Gemma 4 31B — frontier-class quality, multimodal-capable.",
+        "notes": (
+            "Requires --jinja. Slightly exceeds A770 VRAM at Q4_K_M (19.6 GB) — "
+            "use IQ4_XS (17.2 GB) to fit, or allow CPU offload of a few layers."
+        ),
+    },
+
+    # ── Reasoning ─────────────────────────────────────────────────────────────
+    {
+        "name": "DeepSeek-R1 Distill Qwen 7B Q4_K_M",
+        "file": "DeepSeek-R1-Distill-Qwen-7B-Q4_K_M.gguf",
+        "url":  ("https://huggingface.co/bartowski/DeepSeek-R1-Distill-Qwen-7B-GGUF"
+                 "/resolve/main/DeepSeek-R1-Distill-Qwen-7B-Q4_K_M.gguf"),
+        "vram": "5.2", "category": "🧠 Reasoning",
+        "tags": ["DeepSeek", "7B", "Q4_K_M", "CoT"],
+        "recommended": True, "new": False, "jinja": False, "vision": False,
+        "desc": "Smallest R1 distil — chain-of-thought reasoning at 7B scale.",
+        "notes": "Set temp 0.5–0.7. Best for maths, logic, and step-by-step problems.",
+    },
+    {
+        "name": "DeepSeek-R1 Distill Qwen 14B Q4_K_M",
+        "file": "DeepSeek-R1-Distill-Qwen-14B-Q4_K_M.gguf",
+        "url":  ("https://huggingface.co/bartowski/DeepSeek-R1-Distill-Qwen-14B-GGUF"
+                 "/resolve/main/DeepSeek-R1-Distill-Qwen-14B-Q4_K_M.gguf"),
+        "vram": "9.5", "category": "🧠 Reasoning",
+        "tags": ["DeepSeek", "14B", "Q4_K_M", "CoT"],
+        "recommended": False, "new": False, "jinja": False, "vision": False,
+        "desc": "R1 14B distil — significantly stronger reasoning than 7B.",
+        "notes": "Recommended temp 0.6. Outperforms OpenAI o1-mini on many benchmarks.",
+    },
+    {
+        "name": "DeepSeek-R1 Distill Llama 8B Q4_K_M",
+        "file": "DeepSeek-R1-Distill-Llama-8B-Q4_K_M.gguf",
+        "url":  ("https://huggingface.co/bartowski/DeepSeek-R1-Distill-Llama-8B-GGUF"
+                 "/resolve/main/DeepSeek-R1-Distill-Llama-8B-Q4_K_M.gguf"),
+        "vram": "5.5", "category": "🧠 Reasoning",
+        "tags": ["DeepSeek", "8B", "Q4_K_M", "CoT", "Llama base"],
+        "recommended": False, "new": False, "jinja": False, "vision": False,
+        "desc": "R1 reasoning distilled into a Llama 3 8B backbone — fast thinker.",
+        "notes": "Llama-architecture version of R1 distil. Good compatibility with llama.cpp.",
+    },
+    {
+        "name": "DeepSeek-R1 Distill Qwen 32B Q4_K_M",
+        "file": "DeepSeek-R1-Distill-Qwen-32B-Q4_K_M.gguf",
+        "url":  ("https://huggingface.co/bartowski/DeepSeek-R1-Distill-Qwen-32B-GGUF"
+                 "/resolve/main/DeepSeek-R1-Distill-Qwen-32B-Q4_K_M.gguf"),
+        "vram": "20.0", "category": "🧠 Reasoning",
+        "tags": ["DeepSeek", "32B", "Q4_K_M", "CoT", "CPU offload"],
+        "recommended": False, "new": False, "jinja": False, "vision": False,
+        "desc": "Best open-source reasoning model under 70B — outperforms o1-mini.",
+        "notes": (
+            "20 GB at Q4_K_M — exceeds A770 VRAM. Offload a few layers to CPU: "
+            "reduce --n-gpu-layers to ~80 and accept ~40% speed penalty. "
+            "Or use IQ3_M (~14 GB) for full GPU."
+        ),
+    },
+    {
+        "name": "QwQ 32B Q4_K_M",
+        "file": "Qwen_QwQ-32B-Q4_K_M.gguf",
+        "url":  ("https://huggingface.co/bartowski/Qwen_QwQ-32B-GGUF"
+                 "/resolve/main/Qwen_QwQ-32B-Q4_K_M.gguf"),
+        "vram": "20.0", "category": "🧠 Reasoning",
+        "tags": ["Alibaba", "32B", "Q4_K_M", "CoT", "CPU offload"],
+        "recommended": False, "new": False, "jinja": False, "vision": False,
+        "desc": "Alibaba's QwQ — deep reasoning rival to o1, 32B parameter scale.",
+        "notes": (
+            "Same VRAM caveat as R1-32B. Use IQ3_M (~14 GB) to run fully on A770. "
+            "Recommended temp 0.6. Excellent for maths and science problems."
+        ),
+    },
+
+    # ── Coding ─────────────────────────────────────────────────────────────────
+    {
+        "name": "Qwen2.5 Coder 7B Instruct Q4_K_M",
+        "file": "Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf",
+        "url":  ("https://huggingface.co/bartowski/Qwen2.5-Coder-7B-Instruct-GGUF"
+                 "/resolve/main/Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf"),
+        "vram": "5.2", "category": "💻 Coding",
+        "tags": ["Alibaba", "7B", "Q4_K_M", "40+ languages"],
+        "recommended": True, "new": False, "jinja": False, "vision": False,
+        "desc": "State-of-the-art 7B coder — rivals GPT-4o on HumanEval.",
+        "notes": "Supports 40+ languages. Best coding model that fits comfortably on A770.",
+    },
+    {
+        "name": "Qwen2.5 Coder 14B Instruct Q4_K_M",
+        "file": "Qwen2.5-Coder-14B-Instruct-Q4_K_M.gguf",
+        "url":  ("https://huggingface.co/bartowski/Qwen2.5-Coder-14B-Instruct-GGUF"
+                 "/resolve/main/Qwen2.5-Coder-14B-Instruct-Q4_K_M.gguf"),
+        "vram": "9.5", "category": "💻 Coding",
+        "tags": ["Alibaba", "14B", "Q4_K_M", "40+ languages"],
+        "recommended": False, "new": False, "jinja": False, "vision": False,
+        "desc": "Larger Qwen Coder — deeper code understanding, better refactoring.",
+        "notes": "Strong on complex multi-file tasks. Fits A770 with ctx 4096–8192.",
+    },
+    {
+        "name": "Codestral 22B v0.1 Q4_K_M",
+        "file": "Codestral-22B-v0.1-Q4_K_M.gguf",
+        "url":  ("https://huggingface.co/bartowski/Codestral-22B-v0.1-GGUF"
+                 "/resolve/main/Codestral-22B-v0.1-Q4_K_M.gguf"),
+        "vram": "13.5", "category": "💻 Coding",
+        "tags": ["Mistral", "22B", "Q4_K_M", "80+ languages", "FIM"],
+        "recommended": False, "new": False, "jinja": False, "vision": False,
+        "desc": "Mistral's dedicated code model — 80+ languages, fill-in-the-middle.",
+        "notes": (
+            "Just fits A770 (13.5 GB). Excellent for tab-completion / FIM workflows. "
+            "256k context (reduce to 8192 on A770)."
+        ),
+    },
+    {
+        "name": "DeepSeek Coder V2 Lite 16B Q4_K_M",
+        "file": "DeepSeek-Coder-V2-Lite-Instruct-Q4_K_M.gguf",
+        "url":  ("https://huggingface.co/bartowski/DeepSeek-Coder-V2-Lite-Instruct-GGUF"
+                 "/resolve/main/DeepSeek-Coder-V2-Lite-Instruct-Q4_K_M.gguf"),
+        "vram": "10.5", "category": "💻 Coding",
+        "tags": ["DeepSeek", "16B MoE", "Q4_K_M", "300+ languages"],
+        "recommended": False, "new": False, "jinja": False, "vision": False,
+        "desc": "DeepSeek's code specialist — supports 300+ languages, MoE efficiency.",
+        "notes": "16B total, ~2.4B active per token (MoE). Very fast for its quality.",
+    },
+
+    # ── Vision / Multimodal ────────────────────────────────────────────────────
+    {
+        "name": "Qwen2-VL 2B Instruct Q4_K_M",
+        "file": "Qwen2-VL-2B-Instruct-Q4_K_M.gguf",
+        "url":  ("https://huggingface.co/bartowski/Qwen2-VL-2B-Instruct-GGUF"
+                 "/resolve/main/Qwen2-VL-2B-Instruct-Q4_K_M.gguf"),
+        "vram": "1.5", "category": "👁️ Vision / Multimodal",
+        "tags": ["Alibaba", "2B", "Q4_K_M", "image+text", "mmproj"],
+        "recommended": False, "new": False, "jinja": False, "vision": True,
+        "desc": "Tiny 2B vision model — describe and reason about images.",
+        "notes": (
+            "Requires a separate mmproj file. Use llama-qwen2vl-cli binary, not llama-server. "
+            "Download mmproj-Qwen2-VL-2B-Instruct-f32.gguf from the same HF repo."
+        ),
+    },
+    {
+        "name": "Qwen2-VL 7B Instruct Q4_K_M",
+        "file": "Qwen2-VL-7B-Instruct-Q4_K_M.gguf",
+        "url":  ("https://huggingface.co/bartowski/Qwen2-VL-7B-Instruct-GGUF"
+                 "/resolve/main/Qwen2-VL-7B-Instruct-Q4_K_M.gguf"),
+        "vram": "5.4", "category": "👁️ Vision / Multimodal",
+        "tags": ["Alibaba", "7B", "Q4_K_M", "image+text", "mmproj"],
+        "recommended": True, "new": False, "jinja": False, "vision": True,
+        "desc": "Best local vision model at 7B — excellent image Q&A and captioning.",
+        "notes": (
+            "Requires mmproj-Qwen2-VL-7B-Instruct-f32.gguf from the same repo. "
+            "Use llama-qwen2vl-cli. Outstanding OCR capability."
+        ),
+    },
+    {
+        "name": "Llama 3.2 11B Vision Instruct Q4_K_M",
+        "file": "Llama-3.2-11B-Vision-Instruct-Q4_K_M.gguf",
+        "url":  ("https://huggingface.co/bartowski/Llama-3.2-11B-Vision-Instruct-GGUF"
+                 "/resolve/main/Llama-3.2-11B-Vision-Instruct-Q4_K_M.gguf"),
+        "vram": "7.5", "category": "👁️ Vision / Multimodal",
+        "tags": ["Meta", "11B", "Q4_K_M", "image+text"],
+        "recommended": False, "new": False, "jinja": False, "vision": True,
+        "desc": "Meta's 11B multimodal — strong visual reasoning, Llama ecosystem.",
+        "notes": "Native llava-style vision support in llama.cpp. No separate mmproj needed.",
+    },
+
+    # ── Small / Edge ──────────────────────────────────────────────────────────
     {
         "name": "Llama 3.2 3B Instruct Q4_K_M",
         "file": "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
         "url":  ("https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF"
                  "/resolve/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf"),
-        "vram": "2.5", "desc": "Ultra-fast. Use as an agent sub-model or for simple tasks.",
+        "vram": "2.5", "category": "⚡ Small / Edge",
+        "tags": ["Meta", "3B", "Q4_K_M", "fast"],
+        "recommended": True, "new": False, "jinja": False, "vision": False,
+        "desc": "Meta 3B — ultra-fast, great for simple tasks or agent sub-models.",
+        "notes": "Excellent tok/s on A770. Ideal as a router or lightweight assistant.",
     },
     {
-        "name": "DeepSeek-R1 7B Distill Q4_K_M",
-        "file": "DeepSeek-R1-Distill-Qwen-7B-Q4_K_M.gguf",
-        "url":  ("https://huggingface.co/bartowski/DeepSeek-R1-Distill-Qwen-7B-GGUF"
-                 "/resolve/main/DeepSeek-R1-Distill-Qwen-7B-Q4_K_M.gguf"),
-        "vram": "5.2", "desc": "Reasoning/chain-of-thought distil. Great for logic problems.",
+        "name": "Llama 3.2 1B Instruct Q4_K_M",
+        "file": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+        "url":  ("https://huggingface.co/bartowski/Llama-3.2-1B-Instruct-GGUF"
+                 "/resolve/main/Llama-3.2-1B-Instruct-Q4_K_M.gguf"),
+        "vram": "1.3", "category": "⚡ Small / Edge",
+        "tags": ["Meta", "1B", "Q4_K_M", "instant"],
+        "recommended": False, "new": False, "jinja": False, "vision": False,
+        "desc": "Smallest usable Llama — near-instant responses, minimal VRAM.",
+        "notes": "Good for always-on, classification, or routing tasks.",
     },
     {
-        "name": "DeepSeek-R1 14B Distill Q4_K_M",
-        "file": "DeepSeek-R1-Distill-Qwen-14B-Q4_K_M.gguf",
-        "url":  ("https://huggingface.co/bartowski/DeepSeek-R1-Distill-Qwen-14B-GGUF"
-                 "/resolve/main/DeepSeek-R1-Distill-Qwen-14B-Q4_K_M.gguf"),
-        "vram": "9.5", "desc": "Best reasoning model that fits. Think before answering.",
+        "name": "Phi-3.5 Mini Instruct Q4_K_M",
+        "file": "Phi-3.5-mini-instruct-Q4_K_M.gguf",
+        "url":  ("https://huggingface.co/bartowski/Phi-3.5-mini-instruct-GGUF"
+                 "/resolve/main/Phi-3.5-mini-instruct-Q4_K_M.gguf"),
+        "vram": "2.8", "category": "⚡ Small / Edge",
+        "tags": ["Microsoft", "3.8B", "Q4_K_M", "128k ctx"],
+        "recommended": False, "new": False, "jinja": False, "vision": False,
+        "desc": "Microsoft Phi-3.5 — surprisingly capable 3.8B with 128k context.",
+        "notes": "Best-in-class for its size on reasoning benchmarks.",
+    },
+    {
+        "name": "Gemma 2 2B Instruct Q4_K_M",
+        "file": "gemma-2-2b-it-Q4_K_M.gguf",
+        "url":  ("https://huggingface.co/bartowski/gemma-2-2b-it-GGUF"
+                 "/resolve/main/gemma-2-2b-it-Q4_K_M.gguf"),
+        "vram": "1.8", "category": "⚡ Small / Edge",
+        "tags": ["Google", "2B", "Q4_K_M", "efficient"],
+        "recommended": False, "new": False, "jinja": False, "vision": False,
+        "desc": "Google Gemma 2 2B — punches above its weight, clean instruction following.",
+        "notes": "Excellent quality/size ratio. Good as a fast chatbot or summariser.",
     },
 ]
 
