@@ -13,7 +13,7 @@ from core.config import (
 from core.auth   import audit_log
 from core.gpu    import GPUDetector
 from core.stack  import StackManager
-from core.models import ModelManager
+from core.models import ModelManager, ModelConfigManager
 
 def _svc(label: str, ok: bool, url: str, note: str = "",
          start_fn=None, log_name: str = ""):
@@ -79,7 +79,9 @@ def tab_stack():
 
     _svc("llama-server (SYCL)", status["engine"], f":{ENGINE_PORT}",
          "Direct inference — no web search",
-         start_fn=(lambda: StackManager.start_engine(active, gpu_layers)) if active else None,
+         start_fn=(lambda: StackManager.start_engine(
+             active, gpu_layers, ModelConfigManager.load(active)
+         )) if active else None,
          log_name="engine")
     _svc("search proxy", status["proxy"], f":{PROXY_PORT}",
          "Point AnythingLLM here — adds SearXNG transparently",
@@ -146,7 +148,8 @@ def tab_stack():
                 st.error("No model set")
             else:
                 with st.spinner(f"Starting… GPU layers={gpu_layers} (up to 90s)"):
-                    ok, msg = StackManager.start_engine(active, gpu_layers)
+                    cfg = ModelConfigManager.load(active)
+                    ok, msg = StackManager.start_engine(active, gpu_layers, cfg)
                 st.success(msg) if ok else st.error(msg)
                 audit_log(st.session_state.username, "START_ENGINE", msg, ok)
 
@@ -163,7 +166,8 @@ def tab_stack():
                 st.error("No model set")
             else:
                 with st.spinner("Restarting…"):
-                    results = StackManager.restart(active, gpu_layers)
+                    cfg     = ModelConfigManager.load(active)
+                    results = StackManager.restart(active, gpu_layers, cfg)
                 for svc, (ok, msg) in results.items():
                     (st.success if ok else st.error)(f"{'✅' if ok else '❌'} {svc}: {msg}")
                 audit_log(st.session_state.username, "RESTART", str(results))

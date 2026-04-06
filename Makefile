@@ -22,6 +22,8 @@ setup:
 	$(PIP) install \
 	    streamlit \
 	    requests \
+	    requests-ratelimiter \
+	    urllib3 \
 	    PyPDF2 \
 	    python-pam \
 	    bandit \
@@ -127,7 +129,36 @@ install-autostart:
 	@echo "  ✅  Autostart installed — stack will start at login"
 
 # ================================================================
-#  git-sync  — commit and push everything (respects .gitignore)
+#  fix-deps  — install any missing pip packages into the venv
+#              and purge stale __pycache__ bytecode
+#              Run this after a git pull that adds new dependencies.
+# ================================================================
+fix-deps:
+	@if [ ! -d "$(VENV)" ]; then \
+	    echo "❌  venv not found — run 'make setup' first."; exit 1; \
+	fi
+	@echo "▶  Installing / upgrading dependencies…"
+	$(PIP) install --upgrade \
+	    requests-ratelimiter \
+	    urllib3 \
+	    streamlit \
+	    requests \
+	    PyPDF2
+	@echo "▶  Purging stale __pycache__ bytecode…"
+	find . -type d -name __pycache__ ! -path "./.git/*" -exec rm -rf {} + 2>/dev/null || true
+	find . -name "*.pyc" ! -path "./.git/*" -delete 2>/dev/null || true
+	@echo "  ✅  Done. Start the app with:  make run"
+
+# ================================================================
+#  purge-cache  — clear __pycache__ only (no pip changes)
+# ================================================================
+purge-cache:
+	@echo "▶  Purging __pycache__…"
+	find . -type d -name __pycache__ ! -path "./.git/*" -exec rm -rf {} + 2>/dev/null || true
+	find . -name "*.pyc" ! -path "./.git/*" -delete 2>/dev/null || true
+	@echo "  ✅  Bytecode cache cleared."
+
+
 # ================================================================
 git-sync:
 	git add .
@@ -189,4 +220,4 @@ lint:
 test:
 	$(VENV)/bin/pytest tests/ -v 2>/dev/null || echo "No tests yet"
 
-.PHONY: setup run launch install-desktop install-autostart git-sync stop status add-user lint test
+.PHONY: setup run launch install-desktop install-autostart fix-deps purge-cache git-sync stop status add-user lint test
