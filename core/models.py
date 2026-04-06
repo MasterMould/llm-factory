@@ -210,3 +210,140 @@ class ModelConfigManager:
         if lines[-1].endswith(" \\"):
             lines[-1] = lines[-1][:-2]
         return "\n".join(lines)
+
+# ============================================================================
+# HUGGING FACE SEARCH CLIENT
+# Live search against the HF Hub API — no auth token required for public models.
+# API docs: https://huggingface.co/docs/hub/api
+# ============================================================================
+
+HF_API = "https://huggingface.co/api"
+HF_BASE = "https://huggingface.co"
+
+# Quant quality tiers — used to score/sort file choices for the user.
+# Lower index = higher priority recommendation for A770 16 GB.
+_QUANT_PREFERENCE = [
+    "Q4_K_M", "Q5_K_M", "Q4_K_S", "IQ4_XS", "IQ4_NL",
+    "Q3_K_M", "Q3_K_L", "IQ3_M",
+    "Q8_0", "Q6_K",
+    "Q2_K", "IQ2_M", "IQ1_M",
+    "Q4_0", "Q5_0",
+]
+
+
+def _quant_score(filename: str) -> int:
+    """Lower score = recommended first on A770."""
+    fn = filename.upper()
+    for i, q in enumerate(_QUANT_PREFERENCE):
+        if q in fn:
+            return i
+    return 99
+
+
+class HFSearchClient:
+    """
+    Thin wrapper around the public HuggingFace Hub REST API.
+    All methods return plain dicts/lists — no huggingface_hub library required.
+    Gracefully returns [] / {} on any network or parse error so the UI
+    can show a friendly message rather than crash.
+    """
+
+    TIMEOUT = 12   # seconds — aggressive but avoids frozen UI
+
+    @staticmethod
+    def search(query: str, sort: str = "downloads", limit: int = 20,
+               author: str = "") -> List[Dict]:
+        """
+        Search public GGUF repos.
+        Returns list of dicts: {id, downloads, likes, lastModified, author, tags}.
+        sort options: 'downloads' | 'trending' | 'likes' | 'lastModified'
+        """
+        params: Dict = {
+            "library": "gguf",
+            "sort":    sort,
+            "limit":   limit,
+        }
+        if query:
+            params["search"] = query
+        if author:
+            params["author"] = author
+
+        try:
+            r = requests.get(f"{HF_API}/models", params=params,
+                             timeout=HFSearchClient.TIMEOUT)
+            r.raise_for_status()
+            raw = r.json()
+            return [
+                {
+                    "id":           m.get("id", ""),
+                    "author":       m.get("author", m.get("id", "").split("/")[0]),
+                    "downloads":    m.get("downloads", 0),
+                    "likes":        m.get("likes", 0),
+                    "lastModified": m.get("lastModified", ""),
+                    "tags":         m.get("tags", []),
+                    "gated":        m.get("gated", False),
+                }
+                for m in raw
+                if not m.get("gated")       # skip gated / access-restricted repos
+                and m.get("id", "")
+            ]
+        except Exception as e:
+            logger.warning(f"HFSearchClient.search: {e}")
+            return []
+
+    @staticmethod
+    def repo_files(repo_id: str) -> List[Dict]:
+        """
+        Fetch the .gguf file list for a repo.
+        Returns list of dicts: {filename, size_bytes, size_human, url, quant_score, recommended}.
+        Sorted: recommended quant first, then by quant_score.
+        """
+        try:
+            r = requests.get(f"{HF_API}/models/{repo_id}",
+                             timeout=HFSearchClient.TIMEOUT)
+            r.raise_for_status()
+            info = r.json()
+            siblings = info.get("siblings", [])
+            files = []
+            for s in siblings:
+                fn = s.get("rfilename", "")
+                if not fn.lower().endswith(".gguf"):
+                    continue
+                # skip split shards — only list the first shard or unsplit files
+                if "-of-" in fn and not fn.endswith("-00001-of-00001.gguf"):
+                    if not fn.endswith("-00001-of-00002.gguf") and \
+                       "-00001-of-" not in fn:
+                        continue
+                sz = s.get("size", 0) or 0
+                files.append({
+                    "filename":    fn,
+                    "size_bytes":  sz,
+                    "size_human":  f"{sz / 1e9:.2f} GB" if sz else "? GB",
+                    "size_gb":     sz / 1e9 if sz else 0.0,
+                    "url":         f"{HF_BASE}/{repo_id}/resolve/main/{fn}",
+                    "quant_score": _quant_score(fn),
+                    "recommended": _quant_score(fn) == min(_quant_score(f["filename"])
+                                                           for f in [{"filename": fn}])
+                })
+            # Sort: best quant first
+            files.sort(key=lambda x: x["quant_score"])
+            # Mark the top-scored file as recommended
+            if files:
+                best = files[0]["quant_score"]
+                for f in files:
+                    f["recommended"] = f["quant_score"] == best
+            return files
+        except Exception as e:
+            logger.warning(f"HFSearchClient.repo_files({repo_id}): {e}")
+            return []
+
+    @staticmethod
+    def trending(limit: int = 15) -> List[Dict]:
+        """Top trending GGUF repos right now."""
+        return HFSearchClient.search("", sort="trending", limit=limit)
+
+    @staticmethod
+    def popular_authors() -> List[str]:
+        """Well-known GGUF quantisers — shown as quick-filter chips."""
+        return ["bartowski", "unsloth", "MaziyarPanahi", "lmstudio-community",
+                "TheBloke", "ggml-org"]
