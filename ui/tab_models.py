@@ -1,4 +1,4 @@
-# ui/tab_models.py — Model Manager: categorised catalogue, manual download, configure
+# ui/tab_models.py — Model Manager: categorised catalogue + live HF search + configure
 import dataclasses
 import subprocess
 from pathlib import Path
@@ -10,141 +10,363 @@ from core.config import (
     MODEL_CATALOGUE, MODEL_CATEGORIES, MODEL_RUN_CONFIG_FIELDS, ModelRunConfig,
 )
 from core.auth   import audit_log
-from core.models import ModelManager, ModelConfigManager
+from core.models import ModelManager, ModelConfigManager, HFSearchClient
 from core.inference import OllamaClient
 
+_VRAM_BUDGET = 16.0   # Arc A770
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Download tab helpers
-# ═══════════════════════════════════════════════════════════════════════════════
 
-_VRAM_BUDGET = 16.0   # Arc A770 VRAM in GB
+# ═══════════════════════════════════════════════════════════════════════════
+# Shared helpers
+# ═══════════════════════════════════════════════════════════════════════════
 
 def _vram_bar(vram_gb: float) -> str:
-    """Return a mini colour-coded VRAM bar string."""
-    pct = min(vram_gb / _VRAM_BUDGET, 1.0)
+    pct    = min(vram_gb / _VRAM_BUDGET, 1.0)
     filled = int(pct * 10)
-    bar = "█" * filled + "░" * (10 - filled)
-    if pct <= 0.6:
-        colour = "green"
-    elif pct <= 0.9:
-        colour = "orange"
-    else:
-        colour = "red"
-    return f":{colour}[{bar}]  `{vram_gb} GB / {_VRAM_BUDGET} GB`"
+    bar    = "█" * filled + "░" * (10 - filled)
+    colour = "green" if pct <= 0.6 else ("orange" if pct <= 0.95 else "red")
+    return f":{colour}[{bar}]  `{vram_gb:.1f} / {_VRAM_BUDGET:.0f} GB`"
 
 
-def _badges(m: dict) -> str:
-    parts = []
-    if m.get("recommended"): parts.append("⭐ Recommended")
-    if m.get("new"):         parts.append("🔥 New")
-    if m.get("vision"):      parts.append("👁️ Vision")
-    if m.get("jinja"):       parts.append("⚠️ Needs --jinja")
-    return "  ".join(parts)
+def _run_wget(url: str, dest: Path, progress_slot) -> bool:
+    """Blocking wget with live progress bar updates. Returns True on success."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        proc = subprocess.Popen(
+            ["wget", "--progress=dot:mega", "-O", str(dest), url],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        )
+        for line in proc.stdout:
+            if "%" in line:
+                try:
+                    pct = int(line.strip().split("%")[0].split()[-1])
+                    progress_slot.progress(
+                        min(pct, 100) / 100, text=f"Downloading… {pct}%"
+                    )
+                except Exception:
+                    pass
+        proc.wait()
+        if proc.returncode == 0 and dest.exists() and dest.stat().st_size > 0:
+            progress_slot.progress(1.0, text="✅ Complete!")
+            return True
+        dest.unlink(missing_ok=True)
+        return False
+    except FileNotFoundError:
+        st.error("`wget` not found — run: `sudo apt install wget`")
+        dest.unlink(missing_ok=True)
+        return False
+    except Exception as e:
+        st.error(f"Download error: {e}")
+        dest.unlink(missing_ok=True)
+        return False
 
 
-def _model_card(m: dict, dest: Path, key_prefix: str):
-    """Render one model card inside an expander."""
-    vram = float(m["vram"])
-    fits = vram <= _VRAM_BUDGET
-    status_icon = "🟢" if fits else "🟡"
+def _post_download(dest: Path, auto_active: bool, jinja_hint: bool):
+    """Common actions after any successful download."""
+    size = dest.stat().st_size / 1e9
+    st.success(f"Downloaded `{dest.name}` — {size:.2f} GB")
+    if auto_active:
+        ModelManager.set_active(str(dest))
+        if jinja_hint:
+            cfg = ModelConfigManager.load(str(dest))
+            cfg.jinja = True
+            ModelConfigManager.save(str(dest), cfg)
+            st.info("ℹ️ --jinja has been auto-enabled in this model's run config.")
+        st.info("✅ Set as active. Restart the engine (Stack tab) to load it.")
+    audit_log(
+        st.session_state.get("username", "system"),
+        "MODEL_DOWNLOAD", dest.name, True,
+    )
+    st.rerun()
 
-    label = f"{status_icon} **{m['name']}**"
-    badges = _badges(m)
-    if badges:
-        label += f"  —  {badges}"
 
-    with st.expander(label, expanded=False):
-        col_info, col_action = st.columns([3, 1])
+# ═══════════════════════════════════════════════════════════════════════════
+# Tab 1 — Catalogue download
+# ═══════════════════════════════════════════════════════════════════════════
 
-        with col_info:
+def _catalogue_card(m: dict, dest: Path, key: str):
+    vram  = float(m["vram"])
+    fits  = vram <= _VRAM_BUDGET
+    icon  = "🟢" if fits else "🟡"
+    badges = []
+    if m.get("recommended"): badges.append("⭐")
+    if m.get("new"):         badges.append("🔥 New")
+    if m.get("vision"):      badges.append("👁️ Vision")
+    if m.get("jinja"):       badges.append("⚠️ --jinja")
+    badge_str = "  ".join(badges)
+
+    with st.expander(f"{icon} **{m['name']}**  {badge_str}"):
+        col_l, col_r = st.columns([3, 1])
+        with col_l:
             st.markdown(f"**{m['desc']}**")
             if m.get("notes"):
                 st.caption(m["notes"])
             st.markdown(_vram_bar(vram))
-
-            # Tag pills
             tag_str = "  ".join(f"`{t}`" for t in m.get("tags", []))
-            if tag_str:
-                st.markdown(tag_str)
-
+            if tag_str: st.markdown(tag_str)
             st.caption(
                 f"📁 `{m['file']}`  \n"
                 f"🔗 [View on HuggingFace]({m['url'].split('/resolve')[0]})"
             )
-
-        with col_action:
+        with col_r:
             if dest.exists():
-                size_gb = dest.stat().st_size / 1e9
-                st.success(f"✅ Downloaded\n{size_gb:.1f} GB")
-                if st.button("▶️ Set active", key=f"act_{key_prefix}"):
+                st.success(f"✅ {dest.stat().st_size/1e9:.1f} GB")
+                if st.button("▶️ Activate", key=f"cat_act_{key}"):
                     ModelManager.set_active(str(dest))
-                    # Auto-apply recommended config tweaks
-                    cfg = ModelConfigManager.load(str(dest))
-                    if m.get("jinja") and not cfg.jinja:
+                    if m.get("jinja"):
+                        cfg = ModelConfigManager.load(str(dest))
                         cfg.jinja = True
                         ModelConfigManager.save(str(dest), cfg)
-                    st.success("Active!")
-                    st.warning("Restart engine to load.")
                     st.rerun()
             else:
                 if not fits:
-                    st.warning(f"⚠️ {vram} GB  \nExceeds A770  \n(CPU offload OK)")
+                    st.warning(f"⚠️ {vram} GB\nExceeds A770")
                 else:
-                    st.info(f"VRAM: {vram} GB  \nFits ✓")
-                if st.button("⬇️ Download", type="primary", key=f"dl_{key_prefix}"):
-                    progress = st.progress(0, text=f"Starting download of {m['file']}…")
-                    try:
-                        proc = subprocess.Popen(
-                            ["wget", "--progress=dot:mega", "-O", str(dest), m["url"]],
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT,
-                            text=True,
-                        )
-                        for line in proc.stdout:
-                            if "%" in line:
-                                try:
-                                    pct = int(line.strip().split("%")[0].split()[-1])
-                                    progress.progress(
-                                        min(pct, 100) / 100,
-                                        text=f"Downloading… {pct}%"
-                                    )
-                                except Exception:
-                                    pass
-                        proc.wait()
-                        if proc.returncode == 0 and dest.exists():
-                            progress.progress(1.0, text="Complete!")
-                            st.success(f"Downloaded {dest.stat().st_size/1e9:.1f} GB")
-                            audit_log(
-                                st.session_state.get("username", "system"),
-                                "MODEL_DOWNLOAD", m["file"], True,
-                            )
-                            if m.get("jinja"):
-                                st.info(
-                                    "ℹ️ This model requires **--jinja**. "
-                                    "It has been auto-enabled in its run config."
-                                )
-                                cfg = ModelConfigManager.load(str(dest))
-                                cfg.jinja = True
-                                ModelConfigManager.save(str(dest), cfg)
-                            st.rerun()
-                        else:
-                            dest.unlink(missing_ok=True)
-                            st.error("Download failed — check network / disk space.")
-                    except Exception as e:
-                        dest.unlink(missing_ok=True)
-                        st.error(f"Download error: {e}")
+                    st.info(f"{vram} GB VRAM")
+                if st.button("⬇️ Download", type="primary", key=f"cat_dl_{key}"):
+                    prog = st.progress(0, text="Starting…")
+                    ok = _run_wget(m["url"], dest, prog)
+                    if ok:
+                        _post_download(dest, True, bool(m.get("jinja")))
+                    else:
+                        st.error("Download failed.")
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Configure tab helpers  (unchanged from previous version)
-# ═══════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════
+# Tab 2 — Live HF search (Manual Download)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _hf_search_tab():
+    st.markdown(
+        "Search the entire HuggingFace Hub for GGUF models in real time. "
+        "Pick a repo, choose your quantisation, and download — no URL typing needed."
+    )
+
+    # ── Search bar + sort ─────────────────────────────────────────────────
+    col_q, col_sort, col_author = st.columns([3, 1, 1])
+    with col_q:
+        query = st.text_input(
+            "Search HuggingFace",
+            placeholder="e.g. llama, mistral, qwen coder, gemma…",
+            label_visibility="collapsed",
+            key="hf_search_query",
+        )
+    with col_sort:
+        sort = st.selectbox(
+            "Sort", ["downloads", "trending", "likes", "lastModified"],
+            label_visibility="collapsed",
+            key="hf_search_sort",
+        )
+    with col_author:
+        author_input = st.text_input(
+            "Author",
+            placeholder="e.g. bartowski",
+            label_visibility="collapsed",
+            key="hf_search_author",
+        )
+
+    # Quick-author chips
+    st.caption("Quick filter by popular GGUF curators:")
+    chip_cols = st.columns(len(HFSearchClient.popular_authors()))
+    chosen_author = author_input
+    for i, a in enumerate(HFSearchClient.popular_authors()):
+        with chip_cols[i]:
+            if st.button(a, key=f"chip_{a}", use_container_width=True):
+                chosen_author = a
+                st.session_state["hf_search_author"] = a
+                st.rerun()
+
+    st.divider()
+
+    # ── Results ───────────────────────────────────────────────────────────
+    effective_author = st.session_state.get("hf_search_author", "").strip()
+    effective_query  = st.session_state.get("hf_search_query", "").strip()
+
+    if not effective_query and not effective_author:
+        # Show trending by default — useful on first open
+        st.caption("🔥 Trending GGUF models right now:")
+        results = HFSearchClient.trending(limit=12)
+    else:
+        with st.spinner("Searching HuggingFace…"):
+            results = HFSearchClient.search(
+                effective_query,
+                sort=st.session_state.get("hf_search_sort", "downloads"),
+                limit=20,
+                author=effective_author,
+            )
+
+    if not results:
+        st.warning(
+            "No results returned. Check your search terms or network connection.  \n"
+            "HuggingFace API requires internet access from the machine running this app."
+        )
+        return
+
+    st.caption(f"Showing {len(results)} repos — click one to browse its files.")
+
+    # ── Repo selector ─────────────────────────────────────────────────────
+    repo_labels = []
+    for r in results:
+        dl  = f"{r['downloads']:,}" if r['downloads'] else "?"
+        ago = r.get("lastModified", "")[:10]
+        repo_labels.append(f"{r['id']}  ·  ⬇️ {dl}  ·  🕐 {ago}")
+
+    selected_idx = st.selectbox(
+        "Select repo",
+        range(len(repo_labels)),
+        format_func=lambda i: repo_labels[i],
+        label_visibility="collapsed",
+        key="hf_repo_select",
+    )
+    selected_repo = results[selected_idx]
+
+    # Repo metadata strip
+    mc1, mc2, mc3, mc4 = st.columns(4)
+    mc1.metric("Downloads", f"{selected_repo['downloads']:,}")
+    mc2.metric("Likes",     selected_repo['likes'])
+    mc3.metric("Updated",   selected_repo.get("lastModified", "")[:10] or "?")
+    mc4.markdown(
+        f"[🔗 Open on HuggingFace](https://huggingface.co/{selected_repo['id']})"
+    )
+
+    st.divider()
+
+    # ── File picker ───────────────────────────────────────────────────────
+    with st.spinner(f"Fetching file list for `{selected_repo['id']}`…"):
+        files = HFSearchClient.repo_files(selected_repo["id"])
+
+    if not files:
+        st.warning(
+            "No GGUF files found in this repo, or it could not be reached.  \n"
+            "Try opening the HuggingFace page directly to confirm files exist."
+        )
+        return
+
+    # Build file select labels
+    def _file_label(f):
+        rec  = " ⭐ Recommended" if f["recommended"] else ""
+        vram = f"  {_vram_bar_inline(f['size_gb'])}" if f["size_gb"] else ""
+        return f"{f['filename']}  ·  {f['size_human']}{rec}"
+
+    def _vram_bar_inline(gb):
+        if gb <= 0: return ""
+        pct = gb / _VRAM_BUDGET
+        colour = "green" if pct <= 0.6 else ("orange" if pct <= 0.95 else "red")
+        return f"({gb:.1f} GB)"
+
+    # Default selection: first recommended file
+    default_file_idx = 0
+    for i, f in enumerate(files):
+        if f["recommended"]:
+            default_file_idx = i
+            break
+
+    file_idx = st.selectbox(
+        "Choose quantisation",
+        range(len(files)),
+        index=default_file_idx,
+        format_func=lambda i: _file_label(files[i]),
+        key="hf_file_select",
+    )
+    chosen_file = files[file_idx]
+
+    # Quantisation info row
+    fc1, fc2, fc3 = st.columns(3)
+    fc1.markdown(f"**File:** `{chosen_file['filename']}`")
+    fc2.markdown(f"**Size:** `{chosen_file['size_human']}`")
+    gb = chosen_file["size_gb"]
+    if gb > 0:
+        fits = gb <= _VRAM_BUDGET
+        fc3.markdown(
+            "🟢 Fits on A770" if fits else f"🟡 {gb:.1f} GB — CPU offload needed"
+        )
+
+    # VRAM bar
+    if gb > 0:
+        st.markdown(_vram_bar(gb))
+
+    # Quant explainer
+    with st.expander("❓ What do Q4_K_M, Q8_0, IQ4_XS etc. mean?"):
+        st.markdown("""
+**K-quants (QX_K_S / QX_K_M / QX_K_L)** — the recommended default. The number is the bit depth
+(4 = Q4, 5 = Q5, …); M = medium accuracy/size balance; L = larger, higher quality.
+- **Q4_K_M** — best all-round choice for 16 GB GPUs. ~75% the quality loss of Q8 at ~55% the size.
+- **Q5_K_M** — step up if you have headroom; noticeably sharper.
+- **Q8_0** — near-lossless but 2× the size of Q4.
+
+**I-quants (IQ4_XS, IQ3_M …)** — importance-matrix quants. Same bit depth but smarter allocation
+of bits based on layer importance. **IQ4_XS ≈ Q4_K_M quality at ~10% smaller file**.
+Use these when the Q4_K_M is 1–2 GB over your VRAM budget.
+
+**Avoid** Q2_K / IQ1_M unless you have extreme VRAM constraints — quality degrades sharply.
+        """)
+
+    st.divider()
+
+    # ── Download form ─────────────────────────────────────────────────────
+    col_opts, col_btn = st.columns([3, 1])
+    with col_opts:
+        save_name = st.text_input(
+            "Save as",
+            value=chosen_file["filename"],
+            help="Filename under your model directory. Edit if you want a custom name.",
+            key="hf_save_name",
+        )
+        auto_active = st.checkbox("Set as active model after download", value=True,
+                                   key="hf_auto_active")
+
+    with col_btn:
+        st.markdown("&nbsp;", unsafe_allow_html=True)   # vertical spacer
+        st.markdown("&nbsp;", unsafe_allow_html=True)
+        do_download = st.button(
+            "⬇️ Download", type="primary",
+            key="hf_do_download",
+            use_container_width=True,
+        )
+
+    if do_download:
+        if not save_name.endswith(".gguf"):
+            st.error("Filename must end in .gguf")
+        else:
+            dest = MODEL_DIR / save_name
+            if dest.exists():
+                st.warning(
+                    f"`{save_name}` already exists ({dest.stat().st_size/1e9:.1f} GB).  \n"
+                    "Delete it from the Remove tab first if you want to re-download."
+                )
+            else:
+                prog = st.progress(0, text=f"Connecting to {chosen_file['url'][:70]}…")
+                ok = _run_wget(chosen_file["url"], dest, prog)
+                if ok:
+                    _post_download(dest, auto_active, False)
+                else:
+                    st.error(
+                        "Download failed. Common causes:  \n"
+                        "• No internet access from this machine  \n"
+                        "• The repo requires a HuggingFace login (gated model)  \n"
+                        "• Disk full"
+                    )
+
+    # ── CLI snippet ───────────────────────────────────────────────────────
+    with st.expander("📋 Download manually via CLI"):
+        st.code(
+            f"# huggingface-cli (recommended — handles auth + resume)\n"
+            f"pip install -U huggingface_hub\n"
+            f"huggingface-cli download {selected_repo['id']} "
+            f"--include \"{chosen_file['filename']}\" --local-dir {MODEL_DIR}/\n\n"
+            f"# wget (no auth, no resume)\n"
+            f"wget -O {MODEL_DIR}/{chosen_file['filename']} \\\n"
+            f"  \"{chosen_file['url']}\"",
+            language="bash",
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Configure tab helpers
+# ═══════════════════════════════════════════════════════════════════════════
 
 def _field_widget(field: dict, current_val, key_prefix: str):
-    w    = field["widget"]
-    key  = f"{key_prefix}_{field['key']}"
-    label = field["label"]
-    help_ = field["help"]
+    w, key, label, help_ = field["widget"], f"{key_prefix}_{field['key']}", field["label"], field["help"]
     if w == "int_slider":
         return st.slider(label, min_value=field["min"], max_value=field["max"],
                          step=field["step"], value=int(current_val), help=help_, key=key)
@@ -155,23 +377,21 @@ def _field_widget(field: dict, current_val, key_prefix: str):
         return st.checkbox(label, value=bool(current_val), help=help_, key=key)
     if w == "select":
         opts = field["options"]
-        idx  = opts.index(current_val) if current_val in opts else 0
-        return st.selectbox(label, opts, index=idx, help=help_, key=key)
+        return st.selectbox(label, opts, index=opts.index(current_val) if current_val in opts else 0,
+                             help=help_, key=key)
     return current_val
 
 
-def _config_form(model_path: str) -> None:
+def _config_form(model_path: str):
     cfg      = ModelConfigManager.load(model_path)
     cfg_dict = dataclasses.asdict(cfg)
     groups   = {}
     for f in MODEL_RUN_CONFIG_FIELDS:
         groups.setdefault(f["group"], []).append(f)
 
-    st.markdown(
-        f"**Configuring:** `{Path(model_path).name}`  \n"
-        "Each setting maps directly to a `llama-server` / `llama-cli` flag.  \n"
-        "Hover over any label for a plain-English explanation.",
-    )
+    st.markdown(f"**Configuring:** `{Path(model_path).name}`  \n"
+                "Each slider maps directly to a llama-server flag. "
+                "Hover for a plain-English explanation.")
     st.divider()
 
     new_vals: dict = {}
@@ -181,10 +401,9 @@ def _config_form(model_path: str) -> None:
             new_vals[f["key"]] = _field_widget(f, cfg_dict[f["key"]], model_path[:12])
         st.divider()
 
-    col_save, col_reset, col_preview, _ = st.columns([1, 1, 1, 4])
-
-    with col_save:
-        if st.button("💾 Save config", type="primary", key=f"save_cfg_{model_path}"):
+    c_save, c_reset, c_prev, _ = st.columns([1, 1, 1, 4])
+    with c_save:
+        if st.button("💾 Save", type="primary", key=f"save_{model_path}"):
             new_cfg = ModelRunConfig(**{k: new_vals.get(k, cfg_dict[k]) for k in cfg_dict})
             if ModelConfigManager.save(model_path, new_cfg):
                 st.success("Saved.")
@@ -192,34 +411,30 @@ def _config_form(model_path: str) -> None:
                           "MODEL_CONFIG_SAVE", Path(model_path).name)
             else:
                 st.error("Save failed.")
-
-    with col_reset:
-        if st.button("↩️ Reset to defaults", key=f"reset_cfg_{model_path}"):
-            if ModelConfigManager.save(model_path, ModelRunConfig()):
-                st.success("Reset.")
-                st.rerun()
-
-    with col_preview:
-        show_preview = st.toggle("🖥️ Preview command", key=f"prev_{model_path}")
+    with c_reset:
+        if st.button("↩️ Defaults", key=f"reset_{model_path}"):
+            ModelConfigManager.save(model_path, ModelRunConfig())
+            st.success("Reset.")
+            st.rerun()
+    with c_prev:
+        show_preview = st.toggle("🖥️ Preview", key=f"prev_{model_path}")
 
     if show_preview:
         st.divider()
-        current_cfg = ModelRunConfig(**{k: new_vals.get(k, cfg_dict[k]) for k in cfg_dict})
-        tab_cli, tab_srv = st.tabs(["llama-cli", "llama-server"])
-        with tab_cli:
-            st.code(ModelConfigManager.to_command_preview(current_cfg, model_path, "./llama-cli"),
+        cur = ModelRunConfig(**{k: new_vals.get(k, cfg_dict[k]) for k in cfg_dict})
+        t1, t2 = st.tabs(["llama-cli", "llama-server"])
+        with t1:
+            st.code(ModelConfigManager.to_command_preview(cur, model_path, "./llama-cli"),
                     language="bash")
-        with tab_srv:
-            st.code(
-                ModelConfigManager.to_command_preview(current_cfg, model_path, "./llama-server")
-                + f"\n  --port 8080 \\\n  --host 0.0.0.0 \\\n  --api-key local",
-                language="bash",
-            )
+        with t2:
+            st.code(ModelConfigManager.to_command_preview(cur, model_path, "./llama-server")
+                    + f"\n  --port 8080 \\\n  --host 0.0.0.0 \\\n  --api-key local",
+                    language="bash")
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Main tab
-# ═══════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════
+# Main
+# ═══════════════════════════════════════════════════════════════════════════
 
 def tab_models():
     st.header("🤖 Model Manager")
@@ -238,248 +453,101 @@ def tab_models():
 
     active_path = ModelManager.get_active_path()
     active_name = Path(active_path).name if active_path else "none"
-    st.info(f"🟢 **Active model:** `{active_name}`  &ensp; stored in: `{MODEL_CONFIG}`")
+    st.info(f"🟢 **Active:** `{active_name}`  &ensp; `{MODEL_CONFIG}`")
 
     mtabs = st.tabs([
         "📋 Installed",
-        "⬇️ Download",
-        "🔗 Manual Download",
+        "⬇️ Catalogue",
+        "🔍 Search HuggingFace",
         "⚙️ Configure",
         "🔄 Switch",
         "🗑️ Remove",
     ])
 
-    # ── 0: Installed ──────────────────────────────────────────────────────────
+    # ── Installed ────────────────────────────────────────────────────────
     with mtabs[0]:
         installed = ModelManager.list_installed()
         if not installed:
-            st.warning(f"No .gguf files found in `{MODEL_DIR}`")
-            st.info("Use the **Download** tab to fetch a model, or **Manual Download** for a custom URL.")
+            st.warning(f"No .gguf files in `{MODEL_DIR}`")
+            st.info("Use the **Catalogue** or **Search HuggingFace** tab to download one.")
         else:
-            st.success(f"{len(installed)} model(s) in `{MODEL_DIR}`")
+            st.success(f"{len(installed)} model(s) installed")
             for m in installed:
                 marker = "🟢 **" + m["name"] + "**" if m["is_active"] else "⚪ " + m["name"]
                 c1, c2, c3 = st.columns([6, 1, 1])
                 c1.markdown(marker)
                 c2.caption(m["size_human"])
-                cfg_file = ModelConfigManager._cfg_path(m["path"])
-                c3.caption("⚙️ saved" if cfg_file.exists() else "defaults")
+                c3.caption("⚙️" if ModelConfigManager._cfg_path(m["path"]).exists() else "")
 
-    # ── 1: Download (catalogue) ───────────────────────────────────────────────
+    # ── Catalogue ────────────────────────────────────────────────────────
     with mtabs[1]:
-        # Header + filters
-        col_cat, col_vram, col_search = st.columns([2, 1, 2])
+        col_cat, col_vram, col_q = st.columns([2, 1, 2])
         with col_cat:
-            categories = ["🔍 All categories"] + list(MODEL_CATEGORIES.keys())
-            cat_filter = st.selectbox(
-                "Category", categories,
-                help="Filter the catalogue by use-case category.",
-                key="dl_cat_filter",
-            )
+            cats = ["🔍 All"] + list(MODEL_CATEGORIES.keys())
+            cat_filter = st.selectbox("Category", cats, key="cat_filter")
         with col_vram:
-            vram_limit = st.slider(
-                "Max VRAM (GB)", 1.0, 20.0, float(_VRAM_BUDGET), 0.5,
-                help="Hide models that need more VRAM than this. A770 = 16 GB.",
-                key="dl_vram_filter",
-            )
-        with col_search:
-            name_filter = st.text_input(
-                "Search models",
-                placeholder="e.g. coder, deepseek, gemma…",
-                label_visibility="visible",
-                key="dl_name_filter",
-            )
+            vram_lim = st.slider("Max VRAM GB", 1.0, 20.0, _VRAM_BUDGET, 0.5,
+                                 key="cat_vram")
+        with col_q:
+            name_q = st.text_input("Filter", placeholder="name / tag…",
+                                   label_visibility="visible", key="cat_name_q")
 
-        # Count badges
-        total = len(MODEL_CATALOGUE)
-        new_count  = sum(1 for m in MODEL_CATALOGUE if m.get("new"))
-        rec_count  = sum(1 for m in MODEL_CATALOGUE if m.get("recommended"))
         c1, c2, c3 = st.columns(3)
-        c1.metric("Models in catalogue", total)
-        c2.metric("🔥 New this quarter", new_count)
-        c3.metric("⭐ Recommended", rec_count)
+        c1.metric("In catalogue", len(MODEL_CATALOGUE))
+        c2.metric("🔥 New", sum(1 for m in MODEL_CATALOGUE if m.get("new")))
+        c3.metric("⭐ Recommended", sum(1 for m in MODEL_CATALOGUE if m.get("recommended")))
         st.divider()
 
-        # Filter models
         visible = [
             m for m in MODEL_CATALOGUE
-            if (cat_filter == "🔍 All categories" or m["category"] == cat_filter)
-            and float(m["vram"]) <= vram_limit
-            and (not name_filter or name_filter.lower() in m["name"].lower()
-                 or name_filter.lower() in m.get("desc", "").lower()
-                 or any(name_filter.lower() in t.lower() for t in m.get("tags", [])))
+            if (cat_filter == "🔍 All" or m["category"] == cat_filter)
+            and float(m["vram"]) <= vram_lim
+            and (not name_q or name_q.lower() in m["name"].lower()
+                 or name_q.lower() in m.get("desc", "").lower()
+                 or any(name_q.lower() in t.lower() for t in m.get("tags", [])))
         ]
 
         if not visible:
-            st.info("No models match your current filters.")
+            st.info("No models match these filters.")
         else:
-            # Group by category
-            shown_cats = {}
+            grouped = {}
             for m in visible:
-                shown_cats.setdefault(m["category"], []).append(m)
-
-            for cat_name, models in shown_cats.items():
-                cat_desc = MODEL_CATEGORIES.get(cat_name, "")
+                grouped.setdefault(m["category"], []).append(m)
+            for cat_name, models in grouped.items():
                 st.subheader(cat_name)
-                if cat_desc:
-                    st.caption(cat_desc)
-
+                st.caption(MODEL_CATEGORIES.get(cat_name, ""))
                 for m in models:
-                    dest = MODEL_DIR / m["file"]
-                    _model_card(m, dest, m["file"].replace(".", "_"))
-
+                    _catalogue_card(m, MODEL_DIR / m["file"],
+                                    m["file"][:18].replace(".", "_"))
                 st.divider()
 
-    # ── 2: Manual Download ────────────────────────────────────────────────────
+    # ── Search HuggingFace ────────────────────────────────────────────────
     with mtabs[2]:
-        st.markdown(
-            "Download any GGUF from a direct URL — HuggingFace, a local server, "
-            "or any other host. Useful for models not in the catalogue, custom quants, "
-            "or private repos."
-        )
-        st.divider()
+        _hf_search_tab()
 
-        # HuggingFace quick-fill helper
-        with st.expander("💡 HuggingFace URL helper"):
-            st.markdown(
-                "HuggingFace direct download URLs follow this pattern:  \n"
-                "```\nhttps://huggingface.co/{owner}/{repo}/resolve/main/{filename}.gguf\n```  \n"
-                "**Examples:**  \n"
-                "- `bartowski/Meta-Llama-3.1-8B-Instruct-GGUF` → file `Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf`  \n"
-                "- `unsloth/DeepSeek-R1-GGUF` → file `DeepSeek-R1-UD-IQ1_S.gguf`  \n\n"
-                "Go to the model page, click a file → ⋮ menu → **Copy download link**."
-            )
-
-        with st.form("manual_dl_form"):
-            url_input = st.text_input(
-                "Download URL",
-                placeholder="https://huggingface.co/bartowski/…/resolve/main/…Q4_K_M.gguf",
-                help="Direct link to the .gguf file. Must end in .gguf.",
-            )
-
-            # Auto-fill filename from URL
-            auto_name = url_input.split("/")[-1].split("?")[0] if url_input else ""
-            filename_input = st.text_input(
-                "Save as filename",
-                value=auto_name,
-                placeholder="my-model-Q4_K_M.gguf",
-                help="File will be saved to the model directory with this name.",
-            )
-
-            col_set, col_cfg = st.columns(2)
-            with col_set:
-                set_active = st.checkbox(
-                    "Set as active model after download",
-                    value=True,
-                )
-            with col_cfg:
-                open_cfg = st.checkbox(
-                    "Open Configure tab after download",
-                    value=False,
-                )
-
-            submitted = st.form_submit_button("⬇️ Start Download", type="primary")
-
-        if submitted:
-            if not url_input or not url_input.startswith("http"):
-                st.error("Please enter a valid URL starting with http:// or https://")
-            elif not filename_input.endswith(".gguf"):
-                st.error("Filename must end in .gguf")
-            else:
-                dest = MODEL_DIR / filename_input
-                if dest.exists():
-                    st.warning(f"`{filename_input}` already exists ({dest.stat().st_size/1e9:.1f} GB). Delete it first if you want to re-download.")
-                else:
-                    MODEL_DIR.mkdir(parents=True, exist_ok=True)
-                    prog = st.progress(0, text=f"Connecting to {url_input[:60]}…")
-                    try:
-                        proc = subprocess.Popen(
-                            ["wget", "--progress=dot:mega", "-O", str(dest), url_input],
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT,
-                            text=True,
-                        )
-                        for line in proc.stdout:
-                            if "%" in line:
-                                try:
-                                    pct = int(line.strip().split("%")[0].split()[-1])
-                                    prog.progress(min(pct, 100) / 100, text=f"Downloading… {pct}%")
-                                except Exception:
-                                    pass
-                        proc.wait()
-                        if proc.returncode == 0 and dest.exists():
-                            prog.progress(1.0, text="Complete!")
-                            size = dest.stat().st_size / 1e9
-                            st.success(f"✅ Downloaded `{filename_input}` ({size:.2f} GB)")
-                            audit_log(
-                                st.session_state.get("username", "system"),
-                                "MODEL_MANUAL_DL", filename_input, True,
-                            )
-                            if set_active:
-                                ModelManager.set_active(str(dest))
-                                st.info("Set as active model. Restart the engine to load it.")
-                            if open_cfg:
-                                st.session_state["cfg_model_select"] = filename_input
-                            st.rerun()
-                        else:
-                            dest.unlink(missing_ok=True)
-                            st.error("Download failed — check the URL and your network connection.")
-                    except FileNotFoundError:
-                        dest.unlink(missing_ok=True)
-                        st.error("`wget` not found. Install it: `sudo apt install wget`")
-                    except Exception as e:
-                        dest.unlink(missing_ok=True)
-                        st.error(f"Download error: {e}")
-
-        # Show recent manual downloads (files not in catalogue)
-        catalogue_files = {m["file"] for m in MODEL_CATALOGUE}
-        installed = ModelManager.list_installed()
-        custom = [m for m in installed if m["name"] not in catalogue_files]
-        if custom:
-            st.divider()
-            st.subheader("🗂️ Your custom / manual models")
-            for m in custom:
-                c1, c2, c3 = st.columns([5, 1, 1])
-                marker = "🟢 **" + m["name"] + "**" if m["is_active"] else "⚪ " + m["name"]
-                c1.markdown(marker)
-                c2.caption(m["size_human"])
-                with c3:
-                    if not m["is_active"] and st.button("▶️", key=f"cust_act_{m['name']}",
-                                                         help="Set active"):
-                        ModelManager.set_active(m["path"])
-                        st.rerun()
-
-    # ── 3: Configure ─────────────────────────────────────────────────────────
+    # ── Configure ─────────────────────────────────────────────────────────
     with mtabs[3]:
         installed = ModelManager.list_installed()
         if not installed:
-            st.info("No installed models. Download one first.")
+            st.info("No installed models.")
         else:
             opts       = {m["name"]: m["path"] for m in installed}
             default_ix = next((i for i, m in enumerate(installed) if m["is_active"]), 0)
-            chosen_name = st.selectbox(
-                "Select model to configure:",
-                list(opts.keys()),
-                index=default_ix,
-                key="cfg_model_select",
-            )
-            chosen_path = opts[chosen_name]
+            chosen     = st.selectbox("Model to configure", list(opts.keys()),
+                                      index=default_ix, key="cfg_model_select")
+            path       = opts[chosen]
 
-            saved_cfg   = ModelConfigManager.load(chosen_path)
-            default_cfg = ModelRunConfig()
-            saved_dict  = dataclasses.asdict(saved_cfg)
-            def_dict    = dataclasses.asdict(default_cfg)
-            diffs = {k: (def_dict[k], saved_dict[k])
-                     for k in saved_dict if saved_dict[k] != def_dict[k]}
+            saved   = dataclasses.asdict(ModelConfigManager.load(path))
+            default = dataclasses.asdict(ModelRunConfig())
+            diffs   = {k: (default[k], saved[k]) for k in saved if saved[k] != default[k]}
             if diffs:
                 with st.expander(f"🔍 {len(diffs)} setting(s) differ from defaults"):
                     for k, (dv, sv) in diffs.items():
                         st.markdown(f"- **{k}**: default `{dv}` → saved `{sv}`")
-
             st.divider()
-            _config_form(chosen_path)
+            _config_form(path)
 
-    # ── 4: Switch ─────────────────────────────────────────────────────────────
+    # ── Switch ─────────────────────────────────────────────────────────────
     with mtabs[4]:
         installed = ModelManager.list_installed()
         if not installed:
@@ -487,25 +555,18 @@ def tab_models():
         else:
             opts   = {m["name"]: m["path"] for m in installed}
             choice = st.selectbox("Switch to:", list(opts.keys()))
-            chosen = opts[choice]
-
-            cfg = ModelConfigManager.load(chosen)
-            with st.expander("⚙️ Config that will be used when this model starts"):
+            cfg    = ModelConfigManager.load(opts[choice])
+            with st.expander("⚙️ Run config for this model"):
                 for f in MODEL_RUN_CONFIG_FIELDS:
-                    val = getattr(cfg, f["key"])
-                    st.markdown(
-                        f"- `{f['key']}` = **{val}**  "
-                        f"<small>{f['label'].split('(')[0].strip()}</small>",
-                        unsafe_allow_html=True,
-                    )
-
+                    v = getattr(cfg, f["key"])
+                    st.markdown(f"- `{f['key']}` = **{v}**", unsafe_allow_html=False)
             if st.button("✅ Set active"):
-                ModelManager.set_active(chosen)
+                ModelManager.set_active(opts[choice])
                 st.success(f"Active → `{choice}`")
-                st.warning("Restart the engine (Stack tab) to load the new model.")
+                st.warning("Restart engine to load it.")
                 audit_log(st.session_state.username, "MODEL_SWITCH", choice)
 
-    # ── 5: Remove ─────────────────────────────────────────────────────────────
+    # ── Remove ─────────────────────────────────────────────────────────────
     with mtabs[5]:
         installed = ModelManager.list_installed()
         if not installed:
@@ -516,21 +577,19 @@ def tab_models():
             fname = opts[label]
             is_active = any(m["is_active"] and m["name"] == fname for m in installed)
             if is_active:
-                st.warning("⚠️ This is the active model — removing it will auto-select the next one.")
-
-            col_del, col_also, _ = st.columns([1, 2, 4])
-            with col_del:
-                confirm = st.button("🗑️ Confirm delete", type="primary")
-            with col_also:
+                st.warning("⚠️ Active model — removing will auto-select next.")
+            c_del, c_cfg, _ = st.columns([1, 2, 4])
+            with c_del:
+                confirm = st.button("🗑️ Delete", type="primary")
+            with c_cfg:
                 del_cfg = st.checkbox("Also delete saved config", value=True)
-
             if confirm:
                 ok, msg = ModelManager.delete(fname)
                 if ok and del_cfg:
                     from core.config import MODEL_CONFIGS_DIR
-                    cfg_file = MODEL_CONFIGS_DIR / f"{Path(fname).stem}.json"
-                    if cfg_file.exists():
-                        cfg_file.unlink()
+                    cfg_f = MODEL_CONFIGS_DIR / f"{Path(fname).stem}.json"
+                    if cfg_f.exists():
+                        cfg_f.unlink()
                         msg += " + config"
                 st.success(msg) if ok else st.error(msg)
                 audit_log(st.session_state.username, "MODEL_DELETE", fname, ok)
