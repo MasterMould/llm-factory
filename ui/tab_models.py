@@ -518,7 +518,7 @@ def tab_models():
                 st.caption(MODEL_CATEGORIES.get(cat_name, ""))
                 for m in models:
                     _catalogue_card(m, MODEL_DIR / m["file"],
-                                    m["file"][:18].replace(".", "_"))
+                                    m["file"].replace(".", "_"))
                 st.divider()
 
     # ── Search HuggingFace ────────────────────────────────────────────────
